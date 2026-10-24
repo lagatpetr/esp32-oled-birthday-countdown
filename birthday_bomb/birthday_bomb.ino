@@ -27,7 +27,7 @@
 
 // ================= SETTINGS =================
 const int COUNTDOWN_SECONDS = 8;      // countdown starts from this number
-const char* NAME = "Afandi";        // <-- change this to the birthday person's name
+const char* NAME = "Your Name";        // <-- change this to the birthday person's name
 const int OCTAVE_SHIFT = 1;           // 1 = play one octave higher (clearer on small buzzers), 0 = original pitch
 const int SONG_REPEATS = 1;           // how many times the full song plays
 
