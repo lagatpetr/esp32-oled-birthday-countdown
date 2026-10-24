@@ -3,7 +3,9 @@
   -------------------------
   - Bomb-style beeping countdown on an OLED, speeding up toward the end
   - BOOM, then Happy Birthday plays on a passive buzzer
-  - OLED shows balloons, a cake with a flickering candle and confetti
+  - Lively OLED show: wavy title, name that jumps with every note,
+    shine sweep, chasing border lights, twinkling stars, fireworks,
+    floating balloons, music notes, a flickering cake and confetti
   - LEDs flash with the beeps and chase with the melody
 
   Hardware: ESP32 DevKit (30-pin), 128x64 I2C OLED (SSD1306),
@@ -25,14 +27,16 @@
 
 // ================= SETTINGS =================
 const int COUNTDOWN_SECONDS = 8;      // countdown starts from this number
-const char* NAME = "YourName";        // <-- change this to the birthday person's name
+const char* NAME = "Afandi";        // <-- change this to the birthday person's name
+const int OCTAVE_SHIFT = 1;           // 1 = play one octave higher (clearer on small buzzers), 0 = original pitch
+const int SONG_REPEATS = 1;           // how many times the full song plays
 
 #define SDA_PIN    21
 #define SCL_PIN    22
 #define BUZZER_PIN 18                 // buzzer + to D18, - to GND
 
 // LEDs: long leg -> 220 ohm resistor -> GPIO, short leg -> GND
-const int LED_PINS[] = {19, 23, 4, 16};
+const int LED_PINS[] = {19, 23, 4, 15};
 const int LED_COUNT = sizeof(LED_PINS) / sizeof(LED_PINS[0]);
 // ============================================
 
@@ -89,23 +93,29 @@ void beep(int freq, int durationMs) {
 }
 
 // ---------- Happy Birthday melody ----------
-struct Note { int freq; int beats; };   // beats in quarter-beat units (4 = one full beat)
+// beats are counted in sixteenth notes: 1 = sixteenth, 3 = dotted eighth,
+// 4 = quarter, 8 = half, 12 = dotted half (3/4 time, like the real song)
+struct Note { int freq; int beats; };
 
 const Note melody[] = {
   // Happy birthday to you
-  {NOTE_G4, 3}, {NOTE_G4, 1}, {NOTE_A4, 4}, {NOTE_G4, 4}, {NOTE_C5, 4}, {NOTE_B4, 8},
+  {NOTE_G4, 3}, {NOTE_G4, 1}, {NOTE_A4, 4}, {NOTE_G4, 4}, {NOTE_C5, 4}, {NOTE_B4, 12},
   // Happy birthday to you
-  {NOTE_G4, 3}, {NOTE_G4, 1}, {NOTE_A4, 4}, {NOTE_G4, 4}, {NOTE_D5, 4}, {NOTE_C5, 8},
+  {NOTE_G4, 3}, {NOTE_G4, 1}, {NOTE_A4, 4}, {NOTE_G4, 4}, {NOTE_D5, 4}, {NOTE_C5, 12},
   // Happy birthday dear (name)
   {NOTE_G4, 3}, {NOTE_G4, 1}, {NOTE_G5, 4}, {NOTE_E5, 4}, {NOTE_C5, 4}, {NOTE_B4, 4}, {NOTE_A4, 8},
   // Happy birthday to you
-  {NOTE_F5, 3}, {NOTE_F5, 1}, {NOTE_E5, 4}, {NOTE_C5, 4}, {NOTE_D5, 4}, {NOTE_C5, 8}
+  {NOTE_F5, 3}, {NOTE_F5, 1}, {NOTE_E5, 4}, {NOTE_C5, 4}, {NOTE_D5, 4}, {NOTE_C5, 12}
 };
 const int melodyLength = sizeof(melody) / sizeof(melody[0]);
-const int QUARTER_BEAT_MS = 130;   // lower = faster song, higher = slower
+const int SIXTEENTH_MS = 140;      // song speed: lower = faster, higher = slower
+const int NOTE_GAP_MS  = 25;       // tiny silence between notes so repeated notes are clear
 
-// ---------- Animation data ----------
-// Balloons
+// =====================================================
+//                    ANIMATION DATA
+// =====================================================
+
+// Balloons floating up on both sides
 const int BALLOON_COUNT = 4;
 float balloonX[BALLOON_COUNT] = {10, 24, 104, 118};
 float balloonY[BALLOON_COUNT] = {60, 45, 55, 70};
@@ -113,12 +123,29 @@ float balloonSpeed[BALLOON_COUNT] = {0.8, 1.3, 1.0, 1.5};
 bool  balloonFilled[BALLOON_COUNT] = {true, false, true, false};
 
 // Confetti shooting from the cake
-const int CONF_COUNT = 14;
+const int CONF_COUNT = 16;
 struct Particle { float x, y, vx, vy; };
 Particle conf[CONF_COUNT];
 
 const int CAKE_CX = 64;       // cake centre x
 const int CANDLE_TOP_Y = 38;  // where confetti shoots from
+
+// Music notes that float out of the cake with every song note
+const int FLOATER_COUNT = 5;
+struct Floater { float x, y, vx, vy; bool alive; };
+Floater floaters[FLOATER_COUNT];
+
+// One firework at a time
+struct Firework { bool active; int cx, cy, age; };
+Firework fw;
+
+// Twinkling stars
+const int STAR_COUNT = 6;
+const int starX[STAR_COUNT] = {33, 95, 20, 108, 46, 82};
+const int starY[STAR_COUNT] = {22, 22, 38, 38, 34, 34};
+
+// Time of the last beat (every song note triggers one)
+unsigned long lastBeatMs = 0;
 
 void spawnParticle(int i) {
   conf[i].x  = CAKE_CX + random(-3, 4);
@@ -127,36 +154,112 @@ void spawnParticle(int i) {
   conf[i].vy = -(random(25, 55) / 10.0);
 }
 
+void spawnMusicNote() {
+  for (int i = 0; i < FLOATER_COUNT; i++) {
+    if (!floaters[i].alive) {
+      floaters[i].alive = true;
+      floaters[i].x  = CAKE_CX + random(-4, 5);
+      floaters[i].y  = 34;
+      floaters[i].vx = (random(0, 2) ? 1 : -1) * (random(6, 14) / 10.0);
+      floaters[i].vy = -(random(3, 6) / 10.0);
+      return;
+    }
+  }
+}
+
+// A beat: the name jumps, a ring pulses from the cake, a note floats
+// out and a few extra confetti pieces shoot up
+void beat() {
+  lastBeatMs = millis();
+  spawnMusicNote();
+  for (int k = 0; k < 3; k++) spawnParticle(random(0, CONF_COUNT));
+}
+
 void animationInit() {
   randomSeed(esp_random());
   for (int i = 0; i < CONF_COUNT; i++) {
     spawnParticle(i);
-    // spread them out so they don't all fire at once
-    conf[i].y -= random(0, 10);
+    conf[i].y -= random(0, 10);   // spread them out
+  }
+  for (int i = 0; i < FLOATER_COUNT; i++) floaters[i].alive = false;
+  fw.active = false;
+}
+
+void updateAnimation() {
+  for (int i = 0; i < BALLOON_COUNT; i++) {
+    balloonY[i] -= balloonSpeed[i];
+    if (balloonY[i] < 22) balloonY[i] = 72;   // wrap around from the bottom
+  }
+  for (int i = 0; i < CONF_COUNT; i++) {
+    conf[i].x  += conf[i].vx;
+    conf[i].y  += conf[i].vy;
+    conf[i].vy += 0.25;                        // gravity
+    if (conf[i].y > 63 || conf[i].x < 0 || conf[i].x > 127) spawnParticle(i);
+  }
+  for (int i = 0; i < FLOATER_COUNT; i++) {
+    if (!floaters[i].alive) continue;
+    floaters[i].x += floaters[i].vx;
+    floaters[i].y += floaters[i].vy;
+    if (floaters[i].y < 18 || floaters[i].x < 4 || floaters[i].x > 123) floaters[i].alive = false;
+  }
+  if (!fw.active) {
+    if (random(0, 100) < 4) {                  // roughly one firework per second
+      fw.active = true;
+      fw.cx = random(14, 114);
+      fw.cy = random(20, 44);
+      fw.age = 0;
+    }
+  } else if (++fw.age > 14) {
+    fw.active = false;
   }
 }
 
-// ---------- Drawing ----------
-void drawCake(bool flameBig) {
-  // plate
-  display.drawBox(38, 62, 52, 2);
-  // bottom layer
-  display.drawBox(44, 53, 40, 9);
-  // top layer
-  display.drawBox(52, 46, 24, 7);
-  // icing drips (gaps) on bottom layer
-  display.setDrawColor(0);
-  display.drawPixel(50, 54); display.drawPixel(58, 54);
-  display.drawPixel(66, 54); display.drawPixel(74, 54);
-  display.drawPixel(80, 54);
-  display.setDrawColor(1);
-  // candle
-  display.drawBox(CAKE_CX - 1, 40, 3, 6);
-  // flame (flickers)
-  if (flameBig) {
-    display.drawTriangle(CAKE_CX - 2, 39, CAKE_CX + 2, 39, CAKE_CX, 33);
-  } else {
-    display.drawTriangle(CAKE_CX - 1, 39, CAKE_CX + 1, 39, CAKE_CX, 35);
+// =====================================================
+//                       DRAWING
+// =====================================================
+
+// Position along the screen edge (0 .. 379), used for the chasing lights
+void edgePixel(int pos) {
+  int x, y;
+  if (pos < 127)      { x = pos;              y = 0; }
+  else if (pos < 190) { x = 127;              y = pos - 127; }
+  else if (pos < 317) { x = 127 - (pos - 190); y = 63; }
+  else                { x = 0;                y = 63 - (pos - 317); }
+  display.drawPixel(x, y);
+}
+
+void drawMarquee(unsigned long t) {
+  int offset = (t / 25) % 8;                   // lights run around the border
+  for (int k = 0; k < 47; k++) {
+    int pos = (k * 8 + offset) % 380;
+    edgePixel(pos);
+    edgePixel((pos + 1) % 380);
+  }
+}
+
+void drawStars(unsigned long t) {
+  for (int i = 0; i < STAR_COUNT; i++) {
+    int ph = (t / 130 + i * 3) % 8;
+    int s = (ph < 4) ? ph : 8 - ph;            // 0..4..0 twinkle cycle
+    if (s == 0) continue;
+    int x = starX[i], y = starY[i];
+    display.drawPixel(x, y);
+    if (s >= 2) { display.drawHLine(x - 1, y, 3); display.drawVLine(x, y - 1, 3); }
+    if (s >= 4) { display.drawHLine(x - 3, y, 7); display.drawVLine(x, y - 3, 7); }
+  }
+}
+
+void drawFireworks() {
+  if (!fw.active) return;
+  float r = 2 + fw.age * 0.75;
+  if (fw.age < 3) display.drawDisc(fw.cx, fw.cy, 1);
+  for (int k = 0; k < 8; k++) {
+    float a = k * 0.785398;                    // every 45 degrees
+    display.drawPixel(fw.cx + (int)(cos(a) * r), fw.cy + (int)(sin(a) * r));
+    if (fw.age > 4) {
+      display.drawPixel(fw.cx + (int)(cos(a + 0.39) * r * 0.55),
+                        fw.cy + (int)(sin(a + 0.39) * r * 0.55));
+    }
   }
 }
 
@@ -172,6 +275,32 @@ void drawBalloons(unsigned long t) {
   }
 }
 
+void drawCake(unsigned long t) {
+  // plate
+  display.drawBox(38, 62, 52, 2);
+  // bottom layer
+  display.drawBox(44, 53, 40, 9);
+  // top layer
+  display.drawBox(52, 46, 24, 7);
+  // icing drips (gaps) on bottom layer
+  display.setDrawColor(0);
+  display.drawPixel(50, 54); display.drawPixel(58, 54);
+  display.drawPixel(66, 54); display.drawPixel(74, 54);
+  display.drawPixel(80, 54);
+  display.setDrawColor(1);
+  // sprinkles that blink on the top layer
+  if ((t / 200) % 2 == 0) { display.drawPixel(56, 49); display.drawPixel(70, 50); }
+  else                    { display.drawPixel(60, 48); display.drawPixel(73, 49); }
+  // candle
+  display.drawBox(CAKE_CX - 1, 40, 3, 6);
+  // flame: height and lean change all the time
+  int h    = 3 + (t / 80) % 3;                 // 3..5
+  int lean = (int)((t / 130) % 3) - 1;         // -1, 0, 1
+  display.drawTriangle(CAKE_CX - 2, 39, CAKE_CX + 2, 39, CAKE_CX + lean, 38 - h);
+  // little glow dots beside the flame
+  if ((t / 110) % 2 == 0) { display.drawPixel(CAKE_CX - 5, 36); display.drawPixel(CAKE_CX + 5, 36); }
+}
+
 void drawConfetti() {
   for (int i = 0; i < CONF_COUNT; i++) {
     int x = (int)conf[i].x;
@@ -181,37 +310,65 @@ void drawConfetti() {
   }
 }
 
-void updateAnimation() {
-  for (int i = 0; i < BALLOON_COUNT; i++) {
-    balloonY[i] -= balloonSpeed[i];
-    if (balloonY[i] < 22) balloonY[i] = 72;   // wrap around from the bottom
-  }
-  for (int i = 0; i < CONF_COUNT; i++) {
-    conf[i].x  += conf[i].vx;
-    conf[i].y  += conf[i].vy;
-    conf[i].vy += 0.25;                        // gravity
-    if (conf[i].y > 63 || conf[i].x < 0 || conf[i].x > 127) spawnParticle(i);
+void drawFloaters(unsigned long t) {
+  for (int i = 0; i < FLOATER_COUNT; i++) {
+    if (!floaters[i].alive) continue;
+    int x = (int)floaters[i].x + (int)(2.0 * sin(t / 120.0 + i));
+    int y = (int)floaters[i].y;
+    display.drawDisc(x, y, 1);                  // note head
+    display.drawVLine(x + 1, y - 7, 7);         // stem
+    display.drawLine(x + 1, y - 7, x + 4, y - 4); // flag
   }
 }
 
-// One full birthday frame: small title, smaller name, balloons, cake, confetti
+// One full birthday frame
 void drawBirthdayFrame() {
   unsigned long t = millis();
   display.clearBuffer();
 
-  // Title
-  display.setFont(u8g2_font_6x12_tr);
-  int w1 = display.getStrWidth("HAPPY BIRTHDAY");
-  display.drawStr((128 - w1) / 2, 11, "HAPPY BIRTHDAY");
-
-  // Name
-  display.setFont(u8g2_font_helvB10_tr);
-  int w2 = display.getStrWidth(NAME);
-  display.drawStr((128 - w2) / 2, 27, NAME);
-
+  drawMarquee(t);
+  drawStars(t);
+  drawFireworks();
   drawBalloons(t);
-  drawCake((t / 120) % 2 == 0);
+  drawCake(t);
+
+  // ring that pulses out of the cake on every beat
+  unsigned long since = t - lastBeatMs;
+  if (since < 260) display.drawCircle(CAKE_CX, 40, 5 + (int)(since / 22));
+
   drawConfetti();
+  drawFloaters(t);
+
+  // Title: every letter rides a wave
+  display.setFont(u8g2_font_6x12_tr);
+  const char* title = "HAPPY BIRTHDAY";
+  int titleLen = 14;
+  int titleX = (128 - titleLen * 6) / 2;
+  for (int i = 0; i < titleLen; i++) {
+    int y = 12 + (int)(2.0 * sin(t / 160.0 + i * 0.55));
+    display.drawGlyph(titleX + i * 6, y, title[i]);
+  }
+
+  // Name: jumps up on every beat, with a shine sweeping across it
+  display.setFont(u8g2_font_helvB10_tr);
+  int nameW = display.getStrWidth(NAME);
+  int nameX = (128 - nameW) / 2;
+  int jump = 0;
+  if (since < 220) jump = (int)(5.0 * (1.0 - since / 220.0));
+  int nameY = 30 - jump;
+  display.drawStr(nameX, nameY, NAME);
+
+  unsigned long cyc = t % 2600;
+  if (cyc < 900) {
+    int sx = nameX - 8 + (int)(cyc * (nameW + 16) / 900);
+    int x0 = (sx > nameX) ? sx : nameX;
+    int x1 = (sx + 6 < nameX + nameW) ? sx + 6 : nameX + nameW;
+    if (x1 > x0) {
+      display.setDrawColor(2);                  // XOR = the letters flash inverted
+      display.drawBox(x0, nameY - 10, x1 - x0, 12);
+      display.setDrawColor(1);
+    }
+  }
 
   display.sendBuffer();
   updateAnimation();
@@ -279,29 +436,54 @@ void runCountdown() {
   delay(300);
 }
 
-// ---------- Play one note while the animation keeps running ----------
-void playNoteAnimated(int freq, int durMs) {
-  unsigned long start = millis();
-  unsigned long soundEnd = durMs * 0.9;
+// ---------- Play the song on an exact timeline ----------
+unsigned long frameCostMs = 30;    // measured time of one OLED frame
 
-  buzzerTone(freq);
-  bool soundOn = true;
+// Draw one animation frame and remember how long it took
+void drawTimedFrame() {
+  unsigned long startMs = millis();
+  drawBirthdayFrame();
+  frameCostMs = (millis() - startMs) + 3;
+}
 
-  while (millis() - start < (unsigned long)durMs) {
-    if (soundOn && millis() - start >= soundEnd) {
+// Play one note. Timing comes from a fixed schedule, so drawing the
+// animation can never stretch a note or make the rhythm drift.
+void playNoteAnimated(int freq, unsigned long noteStart, unsigned long durMs) {
+  unsigned long soundEnd = noteStart + durMs - NOTE_GAP_MS;
+  unsigned long noteEnd  = noteStart + durMs;
+
+  buzzerTone(freq << OCTAVE_SHIFT);
+  bool soundOn = (freq > 0);
+  if (soundOn) beat();                          // name jumps, ring pulses, note floats
+
+  while (millis() < noteEnd) {
+    unsigned long now = millis();
+    if (soundOn && now >= soundEnd) {
       buzzerOff();               // short gap between notes
       soundOn = false;
     }
-    drawBirthdayFrame();
+    unsigned long nextEvent = soundOn ? soundEnd : noteEnd;
+    // only draw a frame if it will finish before the next sound event
+    if (nextEvent > now && (nextEvent - now) > frameCostMs) drawTimedFrame();
+    else delay(1);
   }
-  if (soundOn) buzzerOff();
+  buzzerOff();
 }
 
-// ---------- Play the song ----------
 void playBirthday() {
-  for (int i = 0; i < melodyLength; i++) {
-    ledOnly(i % LED_COUNT);      // a different LED lights for each note
-    playNoteAnimated(melody[i].freq, melody[i].beats * QUARTER_BEAT_MS);
+  unsigned long noteStart = millis();
+
+  for (int r = 0; r < SONG_REPEATS; r++) {
+    for (int i = 0; i < melodyLength; i++) {
+      ledOnly(i % LED_COUNT);    // a different LED lights for each note
+      unsigned long dur = (unsigned long)melody[i].beats * SIXTEENTH_MS;
+      playNoteAnimated(melody[i].freq, noteStart, dur);
+      noteStart += dur;
+    }
+    if (r < SONG_REPEATS - 1) {  // short pause before the next repeat
+      delay(800);
+      noteStart = millis();
+    }
   }
   ledsAll(false);
 }
@@ -327,12 +509,17 @@ void setup() {
 }
 
 void loop() {
-  // After the song: animation keeps going, LEDs chase
+  // After the song: the show keeps going, with a beat every half second
   static int pos = 0;
   static unsigned long lastLed = 0;
+  static unsigned long lastBeat = 0;
 
   drawBirthdayFrame();
 
+  if (millis() - lastBeat > 550) {
+    lastBeat = millis();
+    beat();
+  }
   if (millis() - lastLed > 250) {
     lastLed = millis();
     ledOnly(pos);
